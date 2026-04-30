@@ -33,6 +33,7 @@
     <properties>
         <air.java.version>25</air.java.version>
         <air.check.skip-pmd>true</air.check.skip-pmd>
+        <centralPublishingMavenPluginVersion>0.9.0</centralPublishingMavenPluginVersion>
         <maven.compiler.release>25</maven.compiler.release>
         <mavenResolverVersion>1.9.24</mavenResolverVersion>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -88,6 +89,17 @@
 
     <build>
         <plugins>
+            <plugin>
+                <groupId>org.sonatype.central</groupId>
+                <artifactId>central-publishing-maven-plugin</artifactId>
+                <version>${centralPublishingMavenPluginVersion}</version>
+                <extensions>true</extensions>
+                <configuration>
+                    <publishingServerId>central</publishingServerId>
+                    <autoPublish>true</autoPublish>
+                    <waitUntil>published</waitUntil>
+                </configuration>
+            </plugin>
             <plugin>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>

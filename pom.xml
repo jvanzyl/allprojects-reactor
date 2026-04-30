@@ -15,6 +15,20 @@
 
     <name>All Projects Reactor Workspace Reader</name>
     <description>Workspace reader that resolves artifacts from all projects discovered in the reactor.</description>
+    <url>https://github.com/jvanzyl/allprojects-reactor</url>
+
+    <inceptionYear>2026</inceptionYear>
+
+    <organization>
+        <name>Jason van Zyl</name>
+    </organization>
+
+    <scm>
+        <connection>scm:git:https://github.com/jvanzyl/allprojects-reactor.git</connection>
+        <developerConnection>scm:git:https://github.com/jvanzyl/allprojects-reactor.git</developerConnection>
+        <tag>HEAD</tag>
+        <url>https://github.com/jvanzyl/allprojects-reactor</url>
+    </scm>
 
     <properties>
         <air.java.version>25</air.java.version>

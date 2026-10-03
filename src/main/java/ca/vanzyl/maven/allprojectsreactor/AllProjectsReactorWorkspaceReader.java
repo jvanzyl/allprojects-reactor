@@ -24,6 +24,9 @@ import org.eclipse.aether.repository.WorkspaceRepository;
 import org.eclipse.aether.util.artifact.ArtifactIdUtils;
 
 import java.io.File;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -34,6 +37,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Stream;
 
 /**
  * Makes all discovered reactor projects available for workspace resolution, even when {@code -pl} restricts execution.
@@ -44,7 +48,7 @@ import java.util.Objects;
 final class AllProjectsReactorWorkspaceReader
         implements MavenWorkspaceReader
 {
-    private static final String RESOLVE_CLASSES_PROPERTY = "allprojects-reactor.resolveClasses";
+    private static final String REQUIRE_PACKAGED_PROPERTY = "reactorRequirePackaged";
 
     private static final Collection<String> COMPILE_PHASE_TYPES = new HashSet<>(Arrays.asList(
             "jar", "ejb-client", "war", "rar", "ejb3", "par", "sar", "wsr", "har", "app-client"));
@@ -52,16 +56,16 @@ final class AllProjectsReactorWorkspaceReader
     private static final WorkspaceRepository REPOSITORY = new WorkspaceRepository("all-projects-reactor");
 
     private final MavenSession session;
-    private final boolean resolveClasses;
+    private final boolean requirePackaged;
     private volatile ProjectIndex index;
 
     AllProjectsReactorWorkspaceReader(MavenSession session)
     {
         this.session = session;
-        this.resolveClasses = Boolean.parseBoolean(
+        this.requirePackaged = Boolean.parseBoolean(
                 session.getUserProperties().getProperty(
-                        RESOLVE_CLASSES_PROPERTY,
-                        session.getSystemProperties().getProperty(RESOLVE_CLASSES_PROPERTY, "true")));
+                        REQUIRE_PACKAGED_PROPERTY,
+                        session.getSystemProperties().getProperty(REQUIRE_PACKAGED_PROPERTY, "false")));
     }
 
     @Override
@@ -79,9 +83,9 @@ final class AllProjectsReactorWorkspaceReader
             return null;
         }
 
-        File file = find(project, artifact);
+        File file = find(project, artifact, true);
         if (file == null && project != project.getExecutionProject()) {
-            file = find(project.getExecutionProject(), artifact);
+            file = find(project.getExecutionProject(), artifact, true);
         }
         return file;
     }
@@ -97,7 +101,8 @@ final class AllProjectsReactorWorkspaceReader
 
         List<String> versions = new ArrayList<>();
         for (MavenProject project : projects) {
-            if (find(project, artifact) != null) {
+            // Version discovery is combined across readers, even when an earlier reader can resolve the artifact.
+            if (find(project, artifact, false) != null) {
                 versions.add(project.getVersion());
             }
         }
@@ -131,37 +136,89 @@ final class AllProjectsReactorWorkspaceReader
         return current;
     }
 
-    private File find(MavenProject project, Artifact requestedArtifact)
+    private File find(MavenProject project, Artifact requestedArtifact, boolean failIfPackagingRequired)
     {
         if ("pom".equals(requestedArtifact.getExtension())) {
             return project.getFile();
         }
 
         Artifact projectArtifact = findMatchingArtifact(project, requestedArtifact);
+        ShadedArtifacts.Output shaded = ShadedArtifacts.find(project, requestedArtifact);
+        File packagedArtifact = shaded == null ? determinePackagedArtifactFile(project, requestedArtifact) : shaded.artifact();
         if (projectArtifact != null && projectArtifact.getFile() != null && projectArtifact.getFile().exists()) {
-            return projectArtifact.getFile();
+            packagedArtifact = projectArtifact.getFile();
         }
 
-        File packagedArtifact = determinePackagedArtifactFile(project, requestedArtifact);
-        if (packagedArtifact.exists()) {
+        File shadedOutput = shaded == null ? null : shaded.classes();
+        if (shadedOutput != null && shadedOutput.isDirectory()
+                && (!packagedArtifact.exists() || hasNewerOutput(shadedOutput, packagedArtifact))) {
+            if (!failIfPackagingRequired) {
+                return null;
+            }
+            // Returning null during artifact resolution would allow a stale installed copy instead.
+            throw new IllegalStateException("Shaded workspace artifact " + requestedArtifact
+                    + " must be repackaged: " + packagedArtifact
+                    + " is missing or older than " + shadedOutput
+                    + ". Run Maven package for " + project.getGroupId() + ":" + project.getArtifactId()
+                    + " (for example, mvn package -pl :" + project.getArtifactId() + " -am)."
+                    + " If the error persists, run mvn clean package -pl :" + project.getArtifactId() + " -am.");
+        }
+
+        File outputDirectory = determineOutputDirectory(project, requestedArtifact);
+        if (requirePackaged) {
+            if (!packagedArtifact.isFile()
+                    || (outputDirectory != null && hasNewerOutput(outputDirectory, packagedArtifact))) {
+                if (!failIfPackagingRequired) {
+                    return null;
+                }
+                // Packaged-only mode must not fall back to an installed snapshot.
+                throw new IllegalStateException("Workspace artifact " + requestedArtifact
+                        + " requires a current packaged file because reactorRequirePackaged is enabled: "
+                        + packagedArtifact + " is missing or older than the compiled output."
+                        + " Run Maven package for " + project.getGroupId() + ":" + project.getArtifactId()
+                        + " (for example, mvn package -pl :" + project.getArtifactId() + " -am)."
+                        + " If the error persists, run mvn clean package -pl :" + project.getArtifactId() + " -am.");
+            }
             return packagedArtifact;
         }
 
-        if (!resolveClasses) {
-            return null;
+        boolean canUseClasses = isTestArtifact(requestedArtifact)
+                || (!hasClassifier(requestedArtifact) && canResolveFromMainOutputDirectory(requestedArtifact));
+        if (packagedArtifact.exists()) {
+            if (canUseClasses && outputDirectory != null && hasNewerOutput(outputDirectory, packagedArtifact)) {
+                return outputDirectory;
+            }
+            return packagedArtifact;
         }
+        return canUseClasses ? outputDirectory : null;
+    }
 
-        if (isTestArtifact(requestedArtifact)) {
-            File testOutputDirectory = Path.of(project.getBuild().getTestOutputDirectory()).toFile();
-            return testOutputDirectory.exists() ? testOutputDirectory : null;
+    private static File determineOutputDirectory(MavenProject project, Artifact artifact)
+    {
+        String directory = isTestArtifact(artifact)
+                ? project.getBuild().getTestOutputDirectory()
+                : project.getBuild().getOutputDirectory();
+        File outputDirectory = Path.of(directory).toFile();
+        return outputDirectory.isDirectory() ? outputDirectory : null;
+    }
+
+    private static boolean hasNewerOutput(File outputDirectory, File packagedArtifact)
+    {
+        try (Stream<Path> output = Files.walk(outputDirectory.toPath())) {
+            var packagedTime = Files.getLastModifiedTime(packagedArtifact.toPath());
+            // Include directories so removing a class or resource also invalidates the archive.
+            return output.anyMatch(path -> {
+                try {
+                    return Files.getLastModifiedTime(path).compareTo(packagedTime) > 0;
+                }
+                catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            });
         }
-
-        if (!hasClassifier(requestedArtifact) && canResolveFromMainOutputDirectory(requestedArtifact)) {
-            File outputDirectory = Path.of(project.getBuild().getOutputDirectory()).toFile();
-            return outputDirectory.exists() ? outputDirectory : null;
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
-
-        return null;
     }
 
     private File determinePackagedArtifactFile(MavenProject project, Artifact artifact)

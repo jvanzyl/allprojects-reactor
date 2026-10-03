@@ -119,9 +119,3 @@ The extension resolves:
 - Test artifacts from `target/test-classes` when present.
 
 The extension does not execute upstream modules. It only makes their existing outputs available to Maven's dependency resolution.
-
-## Testing
-
-Run `mvn verify` to run the unit tests and Maven integration tests. The integration tests use Takari's test harness with Maven 3.9.11 and 3.9.16, and keep fixture projects and isolated local repositories under `target/test-projects`.
-
-The fixtures run the Maven Shade plugin to verify relocated main, attached, and test JARs. They also cover newer compiled classes, packaged-only resolution, stale or missing archives despite installed snapshots, recovery after repackaging, and Maven's own reactor reader handling active modules.
